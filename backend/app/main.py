@@ -48,13 +48,13 @@ def create_run(payload:dict,db:Session=Depends(get_db)):
     for source,fid in payload.get("files",{}).items():
         item=FILES.get(fid)
         if not item or item["source"]!=source:raise HTTPException(422,f"Upload missing or source mismatch: {source}")
+        mapping=payload.get("mappings",{}).get(source,item["mapping"])
         try:
-            raw=read_csv(item["path"]);frame,_=normalize(raw,source,payload.get("mappings",{}).get(source,item["mapping"]),item["filename"])
+            raw=read_csv(item["path"]);frame,_=normalize(raw,source,mapping,item["filename"])
         except (ValueError,KeyError) as exc:raise HTTPException(422,str(exc))
-        frames[source]=frame;meta[source]={"filename":item["filename"],"rows":len(raw),"mapping":payload.get("mappings",{}).get(source,item["mapping"])}
+        frames[source]=frame;meta[source]={"filename":item["filename"],"rows":len(raw),"mapping":mapping}
     if "shopify" not in frames:raise HTTPException(422,"Shopify orders CSV is required")
-    findings=detect(frames);comparison=reconcile(frames)
-    all_dates=[]
+    findings=detect(frames);comparison=reconcile(frames);all_dates=[]
     for f in frames.values():
         for c in ("date","order_date"):
             if c in f:all_dates.extend(f[c].dropna().tolist())
@@ -63,7 +63,7 @@ def create_run(payload:dict,db:Session=Depends(get_db)):
     db.add(run);db.flush()
     for x in findings:db.add(QAException(run_id=run.id,rule_id=x["rule_id"],title=x["title"],description=x["description"],severity=x["severity"],source=x["source"],campaign=x.get("campaign"),affected_records=x["affected_records"],evidence_json=json.dumps(x["evidence"],default=str),why_it_matters=x["why_it_matters"],recommended_action=x["recommended_action"]))
     db.commit();db.refresh(run)
-    return {"run_id":run.id,"records_processed":run.records_processed,"period_start":run.period_start,"period_end":run.period_end,"exception_count":len(findings),"summary":{s:sum(1 for x in findings if x["severity"]==s) for s in ["High","Medium","Low"]},"reconciliation":comparison,"exceptions":findings}
+    return {"run_id":run.id,"id":run.id,"records_processed":run.records_processed,"period_start":run.period_start,"period_end":run.period_end,"exception_count":len(findings),"summary":{s:sum(1 for x in findings if x["severity"]==s) for s in ["High","Medium","Low"]},"reconciliation":comparison,"exceptions":[{"id":e.id,"rule_id":e.rule_id,"title":e.title,"description":e.description,"severity":e.severity,"source":e.source,"campaign":e.campaign,"affected_records":e.affected_records,"evidence":json.loads(e.evidence_json),"why_it_matters":e.why_it_matters,"recommended_action":e.recommended_action,"status":e.status} for e in run.exceptions]}
 @app.get("/api/runs")
 def list_runs(db:Session=Depends(get_db)):
     return [{"id":r.id,"created_at":r.created_at.isoformat(),"records_processed":r.records_processed,"period_start":r.period_start,"period_end":r.period_end,"exception_count":len(r.exceptions)} for r in db.query(QARun).order_by(QARun.created_at.desc()).limit(50)]
@@ -71,11 +71,12 @@ def list_runs(db:Session=Depends(get_db)):
 def get_run(rid:int,db:Session=Depends(get_db)):
     r=db.query(QARun).filter_by(id=rid).first()
     if not r:raise HTTPException(404,"Run not found")
-    return {"id":r.id,"created_at":r.created_at.isoformat(),"records_processed":r.records_processed,"period_start":r.period_start,"period_end":r.period_end,"files":json.loads(r.files_json),"exception_count":len(r.exceptions),"summary":{s:sum(e.severity==s for e in r.exceptions) for s in ["High","Medium","Low"]},"reconciliation":json.loads(r.reconciliation_json)}
+    return {"id":r.id,"run_id":r.id,"created_at":r.created_at.isoformat(),"records_processed":r.records_processed,"period_start":r.period_start,"period_end":r.period_end,"files":json.loads(r.files_json),"exception_count":len(r.exceptions),"summary":{s:sum(e.severity==s for e in r.exceptions) for s in ["High","Medium","Low"]},"reconciliation":json.loads(r.reconciliation_json)}
 def as_dict(e):
     return {"id":e.id,"rule_id":e.rule_id,"title":e.title,"description":e.description,"severity":e.severity,"source":e.source,"campaign":e.campaign,"affected_records":e.affected_records,"evidence":json.loads(e.evidence_json),"why_it_matters":e.why_it_matters,"recommended_action":e.recommended_action,"status":e.status}
 @app.get("/api/runs/{rid}/exceptions")
 def exceptions(rid:int,severity:str|None=None,source:str|None=None,db:Session=Depends(get_db)):
+    if not db.query(QARun).filter_by(id=rid).first():raise HTTPException(404,"Run not found")
     q=db.query(QAException).filter_by(run_id=rid)
     if severity:q=q.filter_by(severity=severity)
     if source:q=q.filter_by(source=source)
@@ -105,5 +106,4 @@ def export(rid:int,kind:str,db:Session=Depends(get_db)):
         data=[as_dict(e) for e in r.exceptions]
         if kind=="invalid-records":data=[e for e in data if e["rule_id"] in {"INVALID_DATE","INVALID_PURCHASE_VALUE"}]
     else:raise HTTPException(400,"Unknown export type")
-    csv=pd.json_normalize(data).to_csv(index=False)
-    return StreamingResponse(iter([csv]),media_type="text/csv",headers={"Content-Disposition":f'attachment; filename="conversion-qa-{rid}-{kind}.csv"'})
+    return StreamingResponse(iter([pd.json_normalize(data).to_csv(index=False)]),media_type="text/csv",headers={"Content-Disposition":f'attachment; filename="conversion-qa-{rid}-{kind}.csv"'})
