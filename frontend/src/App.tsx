@@ -2,7 +2,7 @@ import{useEffect,useState}from"react";import{Activity,AlertTriangle,BarChart3,Ch
 type Src="google_ads"|"meta_ads"|"shopify";const names:Record<Src,string>={google_ads:"Google Ads",meta_ads:"Meta Ads",shopify:"Shopify orders"};
 export default function App(){
  const[page,P]=useState("Overview"),[files,F]=useState<Record<string,any>>({}),[maps,M]=useState<Record<string,any>>({}),[runs,R]=useState<any[]>([]),[current,C]=useState<any>(null),[exceptions,E]=useState<any[]>([]),[recon,Q]=useState<any[]>([]),[detail,D]=useState<any>(null),[busy,B]=useState(false),[error,Err]=useState(""),[filter,Z]=useState("All"),[search,S]=useState("");
- async function refresh(){try{const rs=await listRuns();R(rs);if(rs.length&&!current){await openRun(rs[0].id);}}catch{}}
+ async function refresh(){try{const rs=await listRuns();R(rs);if(rs.length&&!current){try{await openRun(rs[0].id);}catch{}}}catch{}}
  async function openRun(id:number){const[runData,ex]=await Promise.all([getRun(id),listExceptions(id)]);C(runData);E(ex);Q(runData.reconciliation??[]);}
  useEffect(()=>{refresh();},[]);
  async function addFile(source:Src,file?:File){if(!file)return;B(true);Err("");try{const x=await upload(source,file);F(v=>({...v,[source]:x}));M(v=>({...v,[source]:x.mapping_suggestion}));}catch(e:any){Err(e.message)}finally{B(false)}}
