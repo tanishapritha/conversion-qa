@@ -17,13 +17,15 @@ def health():return {"status":"ok"}
 async def upload(source:str,file:UploadFile=File(...)):
     if source not in REQUIRED:raise HTTPException(400,"Invalid source")
     if not file.filename or not file.filename.lower().endswith(".csv"):raise HTTPException(400,"Upload a CSV file")
+    safe_name=__import__("pathlib").Path(file.filename).name
+    if not safe_name.lower().endswith(".csv"):raise HTTPException(400,"Invalid filename")
     content=await file.read()
     if len(content)>15*1024*1024:raise HTTPException(413,"CSV exceeds 15 MB")
     if not content:raise HTTPException(400,"Uploaded file is empty")
     fid=uuid.uuid4().hex;path=UPLOAD_DIR/(fid+".csv");path.write_bytes(content)
     try:f=read_csv(path)
     except ValueError as exc:path.unlink(missing_ok=True);raise HTTPException(422,str(exc))
-    mapping=suggest_mapping(f.columns.tolist(),source);FILES[fid]={"path":path,"source":source,"filename":file.filename,"mapping":mapping}
+    mapping=suggest_mapping(f.columns.tolist(),source);FILES[fid]={"path":path,"source":source,"filename":safe_name,"mapping":mapping}
     return {"file_id":fid,"source":source,"filename":file.filename,"rows":len(f),"columns":f.columns.tolist(),"mapping_suggestion":mapping,"missing_required":[k for k in REQUIRED[source] if k not in mapping],"preview":f.head(8).fillna("").to_dict("records")}
 @app.get("/api/upload/{fid}/preview")
 def preview(fid:str):
