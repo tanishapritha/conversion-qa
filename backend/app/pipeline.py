@@ -9,11 +9,15 @@ REQUIRED = {
  "shopify": {"order_id":["order id","name","order","id"],"order_date":["created at","order date","date"],"total":["total","total price","current total price"],"financial_status":["financial status","payment status","status"]},
 }
 OPTIONAL={"shopify":{"source":["utm source","source","first click source"],"medium":["utm medium","medium"],"campaign":["utm campaign","campaign"]}}
-
 def clean_header(v): return re.sub(r"[^a-z0-9]+"," ",str(v).strip().lower()).strip()
 def suggest_mapping(columns,source):
     normalized={clean_header(c):c for c in columns}
-    return {field:normalized[alias] for field,aliases in {**REQUIRED[source],**OPTIONAL.get(source,{})}.items() if (alias:=next((a for a in aliases if a in normalized),None))}
+    result={}
+    for field,aliases in {**REQUIRED[source],**OPTIONAL.get(source,{})}.items():
+        for alias in aliases:
+            if alias in normalized:
+                result[field]=normalized[alias];break
+    return result
 def read_csv(path:Path):
     try: frame=pd.read_csv(path,dtype=str,keep_default_na=False)
     except pd.errors.EmptyDataError as exc: raise ValueError("CSV is empty and has no header row.") from exc
@@ -28,7 +32,12 @@ def normalize(frame,source,mapping,filename):
         if col in frame.columns: out[field]=frame[col].astype(str).str.strip()
     date_field="order_date" if source=="shopify" else "date"
     raw=out[date_field].copy()
-    out[date_field]=pd.to_datetime(raw,errors="coerce",utc=True,dayfirst=False)
+    # mixed=True preserves support for both ISO and common day-first platform exports.
+    out[date_field]=pd.to_datetime(raw,errors="coerce",utc=True,format="mixed",dayfirst=False)
+    # Explicit day-first retry for values that remained invalid.
+    invalid=out[date_field].isna()
+    if invalid.any():
+        out.loc[invalid,date_field]=pd.to_datetime(raw[invalid],errors="coerce",utc=True,format="mixed",dayfirst=True)
     out[date_field+"_original"]=raw
     numeric={"total"} if source=="shopify" else ({"conversions","conversion_value"} if source=="google_ads" else {"purchases","purchase_value"})
     for field in numeric:
@@ -39,13 +48,10 @@ def normalize(frame,source,mapping,filename):
     for field in OPTIONAL.get(source,{}):
         if field not in out: out[field]=""
     return out,[]
-
 def make_issue(rule_id,title,description,severity,source,records,why,action,evidence=None):
     return {"rule_id":rule_id,"title":title,"description":description,"severity":severity,"source":source,"campaign":None,"affected_records":len(records),"evidence":evidence or {"records":records},"why_it_matters":why,"recommended_action":action}
-
 def detect(frames,drop_threshold=.5):
-    findings=[]
-    shop=frames.get("shopify")
+    findings=[];shop=frames.get("shopify")
     if shop is not None:
         dup=shop[shop.order_id.duplicated(keep=False)]
         if not dup.empty:
@@ -77,21 +83,19 @@ def detect(frames,drop_threshold=.5):
         if valid.empty: continue
         daily=valid.groupby(valid.date.dt.date)[metric].sum(min_count=1).sort_index()
         for i in range(7,len(daily)):
-            baseline=daily.iloc[i-7:i]; mean=float(baseline.mean()); current=float(daily.iloc[i])
+            baseline=daily.iloc[i-7:i];mean=float(baseline.mean());current=float(daily.iloc[i])
             if mean>=2 and current<=mean*(1-drop_threshold):
                 rec=[{"date":str(daily.index[i]),"current":current,"baseline_daily_average":round(mean,3),"drop_percent":round((1-current/mean)*100,2),"baseline_days":7,"threshold_percent":drop_threshold*100}]
                 findings.append(make_issue("CONVERSION_DROP","Unusual conversion drop",f"{source} reported {current:g} {metric} on {daily.index[i]}, {rec[0]['drop_percent']}% below the preceding seven-day average.","High",source,rec,"A drop can reflect demand, spend, site issues, reporting changes or lag; it is not proof of broken tracking.","Check spend and delivery, checkout health, tag diagnostics and reporting delays.",{"records":rec}))
     return findings
-
 def reconcile(frames):
     shop=frames.get("shopify")
     if shop is None:return []
     eligible=shop[~shop.financial_status.str.lower().str.contains("cancel|test",na=False)]
-    orders=int(eligible.order_id.nunique()); revenue=float(eligible.total.sum(skipna=True))
-    result=[]
+    orders=int(eligible.order_id.nunique());revenue=float(eligible.total.sum(skipna=True));result=[]
     for source,metric,value_field in [("google_ads","conversions","conversion_value"),("meta_ads","purchases","purchase_value")]:
         f=frames.get(source)
         if f is None:continue
-        conversions=float(f[metric].sum(skipna=True)); value=float(f[value_field].sum(skipna=True))
+        conversions=float(f[metric].sum(skipna=True));value=float(f[value_field].sum(skipna=True))
         result.append({"platform":source,"platform_conversions":conversions,"available_shopify_orders":orders,"conversion_difference":conversions-orders,"platform_conversion_value":value,"comparable_shopify_revenue":revenue,"value_difference":value-revenue,"matching_method":"Aggregate comparison only","status":"Aggregate discrepancy — attribution not independently verified","limitations":["No shared transaction identifier used for row-level matching.","Attribution windows and conversion lag are not modeled.","Currency and timezone comparability require operator verification.","Cancelled and test orders omitted from basic order count; refunded orders remain included."]})
     return result
