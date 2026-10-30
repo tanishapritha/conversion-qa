@@ -1,0 +1,1 @@
+Run `python -m app.sample_data` from backend, then copy generated CSVs from sample_data/ into this directory to expose them through the Vite dev server. For pilot privacy, this project does not automatically publish uploaded data.
