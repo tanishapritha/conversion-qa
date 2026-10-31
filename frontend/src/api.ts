@@ -1,4 +1,4 @@
-const BASE=import.meta.env.VITE_API_URL??"http://127.0.0.1:8000";
+const BASE=(import.meta.env.VITE_API_URL??"http://127.0.0.1:8000").replace(/\\/$/, "");
 async function req(path:string,init?:RequestInit){const r=await fetch(BASE+path,init);if(!r.ok){const b=await r.json().catch(()=>({}));throw new Error(b.detail??"Request failed");}return r;}
 export async function upload(source:string,file:File){const f=new FormData();f.append("file",file);return(await req("/api/upload?source="+source,{method:"POST",body:f})).json();}
 export async function saveMapping(id:string,mapping:Record<string,string>){return(await req("/api/upload/"+id+"/mapping",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({mapping})})).json();}
