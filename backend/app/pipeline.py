@@ -118,7 +118,7 @@ def normalize(
                 )
         if "campaign" in result:
             result["campaign"] = result["campaign"].astype("string").str.strip()
-    result["source"] = source
+    result["source_type"] = source
     return result.reset_index(drop=True), []
 
 def _finding(rule_id: str, title: str, description: str, severity: str,
