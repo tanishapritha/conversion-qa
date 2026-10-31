@@ -1,18 +1,58 @@
-import json,uuid
+import json,uuid,os
+from pathlib import Path
 from fastapi import FastAPI,File,UploadFile,HTTPException,Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import text
 import pandas as pd
-from .db import Base,engine,get_db,UPLOAD_DIR
+from .db import Base,engine,get_db,UPLOAD_DIR,DATA_DIR
 from .models import QARun,QAException
 from .pipeline import REQUIRED,read_csv,suggest_mapping,normalize,detect,reconcile
 Base.metadata.create_all(bind=engine)
 app=FastAPI(title="Conversion QA API",version="1.0.0")
-app.add_middleware(CORSMiddleware,allow_origins=["http://localhost:5173","http://127.0.0.1:5173"],allow_methods=["*"],allow_headers=["*"])
-FILES={}
+allowed_origins = ["http://localhost:5173", "http://127.0.0.1:5173"]
+allowed_origins.extend(x.strip().rstrip("/") for x in os.getenv("CORS_ORIGINS", "").split(",") if x.strip())
+app.add_middleware(CORSMiddleware, allow_origins=allowed_origins, allow_methods=["*"], allow_headers=["*"])
+
+REGISTRY_PATH = DATA_DIR / "uploads.json"
+
+def _load_registry():
+    if not REGISTRY_PATH.exists():
+        return {}
+    try:
+        stored = json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    restored = {}
+    for fid, item in stored.items():
+        try:
+            path = Path(item["path"]).resolve()
+            if path.parent == UPLOAD_DIR.resolve() and path.is_file() and item["source"] in REQUIRED:
+                restored[fid] = {**item, "path": path}
+        except (KeyError, TypeError, OSError):
+            continue
+    return restored
+
+def _persist_registry():
+    payload = {
+        fid: {**item, "path": str(item["path"])}
+        for fid, item in FILES.items()
+    }
+    temporary = REGISTRY_PATH.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload), encoding="utf-8")
+    temporary.replace(REGISTRY_PATH)
+
+FILES = _load_registry()
+
 @app.get("/api/health")
-def health():return {"status":"ok"}
+def health():
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        return {"status": "ok", "database": "ok"}
+    except Exception:
+        raise HTTPException(503, "Database connection is not ready")
 @app.post("/api/upload")
 async def upload(source:str,file:UploadFile=File(...)):
     if source not in REQUIRED:raise HTTPException(400,"Invalid source")
@@ -26,7 +66,8 @@ async def upload(source:str,file:UploadFile=File(...)):
     try:f=read_csv(path)
     except ValueError as exc:path.unlink(missing_ok=True);raise HTTPException(422,str(exc))
     mapping=suggest_mapping(f.columns.tolist(),source);FILES[fid]={"path":path,"source":source,"filename":safe_name,"mapping":mapping}
-    return {"file_id":fid,"source":source,"filename":file.filename,"rows":len(f),"columns":f.columns.tolist(),"mapping_suggestion":mapping,"missing_required":[k for k in REQUIRED[source] if k not in mapping],"preview":f.head(8).fillna("").to_dict("records")}
+    _persist_registry()
+    return {"file_id":fid,"source":source,"filename":safe_name,"rows":len(f),"columns":f.columns.tolist(),"mapping_suggestion":mapping,"missing_required":[k for k in REQUIRED[source] if k not in mapping],"preview":f.head(8).fillna("").to_dict("records")}
 @app.get("/api/upload/{fid}/preview")
 def preview(fid:str):
     item=FILES.get(fid)
@@ -43,6 +84,7 @@ def set_mapping(fid:str,payload:dict):
     missing=[k for k in REQUIRED[item["source"]] if k not in mapping]
     if missing:raise HTTPException(422,f"Missing required mappings: {missing}")
     item["mapping"]=mapping
+    _persist_registry()
     return {"file_id":fid,"mapping":mapping,"valid":True}
 @app.post("/api/runs")
 def create_run(payload:dict,db:Session=Depends(get_db)):
